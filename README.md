@@ -191,6 +191,31 @@ nimbus likes path                   # где лежит рабочий файл
 Свой `client_id` можно передать флагом `-client-id` или переменной `SC_CLIENT_ID`.
 Если трек не играет, запустите `nimbus -debug nimbus.log` — в лог попадут доступные форматы и ошибки.
 
+## Если SoundCloud недоступен у провайдера
+
+nimbus ходит к трём доменам (вместе с поддоменами):
+
+| Домен | Зачем |
+|-------|-------|
+| `soundcloud.com` | API: поиск, ссылки, лайки профиля |
+| `sndcdn.com` | скрипты сайта (оттуда берётся `client_id`) и часть аудиопотоков |
+| `soundcloud.cloud` | серверы, с которых сейчас отдаются треки (AAC/HLS) |
+
+Если у вас установлен [zapret](https://github.com/Flowseal/zapret-discord-youtube) для Windows,
+VPN не нужен — достаточно добавить эти домены в его пользовательский список
+`lists\list-general-user.txt`:
+
+```
+soundcloud.com
+sndcdn.com
+soundcloud.cloud
+```
+
+и перезапустить zapret (`general.bat` или службу). Если не заработало — попробуйте другие
+стратегии (`general (ALT).bat`, `general (ALT2).bat` …). Если сервер потока окажется другим,
+его видно в логе: `nimbus -debug nimbus.log` пишет строку `stream host: …` — этот домен
+тоже нужно добавить в список.
+
 ## Как это устроено
 
 ```
