@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ResidentAngel/nimbus/internal/history"
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 	"github.com/ResidentAngel/nimbus/internal/ui"
@@ -51,7 +52,7 @@ func main() {
 		sc.Log = lg.Printf
 	}
 
-	m := ui.New(sc, pl, strings.Join(flag.Args(), " "))
+	m := ui.New(sc, pl, history.Open(history.DefaultPath()), strings.Join(flag.Args(), " "))
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ошибка:", err)
 		os.Exit(1)

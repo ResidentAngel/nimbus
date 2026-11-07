@@ -22,7 +22,8 @@ type Player struct {
 	format beep.Format
 	ctrl   *beep.Ctrl
 	vol    *effects.Volume
-	volume float64 // логарифмическая громкость, 0 = исходная
+	volume float64       // логарифмическая громкость, 0 = исходная
+	start  time.Duration // смещение потока от начала трека (после перемотки)
 }
 
 func New() (*Player, error) {
@@ -33,8 +34,10 @@ func New() (*Player, error) {
 }
 
 // Play начинает воспроизведение потока, останавливая предыдущий.
+// start — с какого места трека начинается поток (для отображения позиции),
+// paused — сразу поставить на паузу (перемотка во время паузы).
 // onEnd вызывается (в отдельной горутине), когда трек доиграл до конца.
-func (p *Player) Play(rc io.ReadCloser, onEnd func()) error {
+func (p *Player) Play(rc io.ReadCloser, start time.Duration, paused bool, onEnd func()) error {
 	p.playMu.Lock()
 	defer p.playMu.Unlock()
 	dec, format, err := mp3.Decode(rc) // ждёт первые данные; старый трек пока играет
@@ -52,8 +55,8 @@ func (p *Player) Play(rc io.ReadCloser, onEnd func()) error {
 	p.mu.Lock()
 	p.gen++
 	gen := p.gen
-	p.src, p.format = dec, format
-	p.ctrl = &beep.Ctrl{Streamer: beep.Seq(s, beep.Callback(func() {
+	p.src, p.format, p.start = dec, format, start
+	p.ctrl = &beep.Ctrl{Paused: paused, Streamer: beep.Seq(s, beep.Callback(func() {
 		go func() {
 			p.mu.Lock()
 			current := p.gen == gen
@@ -134,5 +137,5 @@ func (p *Player) State() (pos time.Duration, paused, playing bool) {
 	}
 	speaker.Lock()
 	defer speaker.Unlock()
-	return p.format.SampleRate.D(p.src.Position()), p.ctrl.Paused, true
+	return p.start + p.format.SampleRate.D(p.src.Position()), p.ctrl.Paused, true
 }

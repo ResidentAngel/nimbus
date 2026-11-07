@@ -13,11 +13,24 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ResidentAngel/nimbus/internal/history"
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 )
 
-const maxSkips = 5
+const (
+	maxSkips    = 5
+	seekStep    = 10 * time.Second
+	seekBigStep = 30 * time.Second
+	seekDelay   = 350 * time.Millisecond // копим нажатия, чтобы не переоткрывать поток на каждое
+)
+
+type viewMode int
+
+const (
+	viewSearch viewMode = iota
+	viewHistory
+)
 
 type (
 	tickMsg   time.Time
@@ -32,19 +45,26 @@ type (
 		idx     int
 		track   soundcloud.Track
 		preview bool
+		seek    bool // переоткрытие текущего трека после перемотки
 		err     error
 	}
+	seekFireMsg struct{ gen int }
 )
 
 type Model struct {
-	sc *soundcloud.Client
-	pl *player.Player
+	sc   *soundcloud.Client
+	pl   *player.Player
+	hist *history.Store
 
 	input textinput.Model
 	spin  spinner.Model
 
-	tracks         []soundcloud.Track // текущие результаты поиска
+	view           viewMode
+	tracks         []soundcloud.Track // то, что сейчас показано в списке
+	playedAt       []time.Time        // для истории: когда играл каждый трек из tracks
+	results        []soundcloud.Track // последние результаты поиска
 	cursor, offset int
+	searchCursor   int
 
 	queue    []soundcloud.Track // список, из которого идёт воспроизведение
 	queueIdx int
@@ -56,6 +76,11 @@ type Model struct {
 	paused  bool
 	playing bool
 	volume  int
+
+	seekPending bool // ждём, пока пользователь закончит жать стрелки
+	seeking     bool // поток переоткрывается
+	seekTarget  time.Duration
+	seekGen     int
 
 	loading   string
 	status    string
@@ -69,7 +94,7 @@ type Model struct {
 }
 
 // New создаёт модель. initial — стартовый поисковый запрос или ссылка (может быть пустым).
-func New(sc *soundcloud.Client, pl *player.Player, initial string) *Model {
+func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, initial string) *Model {
 	in := textinput.New()
 	in.Prompt = "  "
 	in.Placeholder = "поиск треков или ссылка soundcloud.com…"
@@ -81,12 +106,15 @@ func New(sc *soundcloud.Client, pl *player.Player, initial string) *Model {
 	sp.Spinner = spinner.MiniDot
 	sp.Style = accentStyle
 
+	if hist == nil {
+		hist = history.Open("")
+	}
 	m := &Model{
-		sc: sc, pl: pl, input: in, spin: sp,
+		sc: sc, pl: pl, hist: hist, input: in, spin: sp,
 		queueIdx: -1, volume: pl.Volume(), initial: strings.TrimSpace(initial),
 		ended: make(chan struct{}, 1), req: new(atomic.Int64),
 		width: 80, height: 24,
-		status: "Нажмите / для поиска, ? — подсказка по клавишам",
+		status: "Нажмите / для поиска, h — история, ? — подсказка по клавишам",
 	}
 	if m.initial == "" {
 		m.input.Focus()
@@ -143,12 +171,8 @@ func (m *Model) submit(q string) tea.Cmd {
 	})
 }
 
-// play запускает воспроизведение трека queue[idx] в фоне.
-func (m *Model) play(idx int) tea.Cmd {
-	if idx < 0 || idx >= len(m.queue) {
-		return nil
-	}
-	t := m.queue[idx]
+// open запускает в фоне открытие трека t с позиции offset.
+func (m *Model) open(t soundcloud.Track, idx int, offset time.Duration, paused, seek bool, label string) tea.Cmd {
 	id := m.req.Add(1)
 	sc, pl, ended, req := m.sc, m.pl, m.ended, m.req
 	onEnd := func() {
@@ -157,22 +181,37 @@ func (m *Model) play(idx int) tea.Cmd {
 		default:
 		}
 	}
-	return tea.Batch(m.startLoading("Загружаю "+t.Title), func() tea.Msg {
+	return tea.Batch(m.startLoading(label), func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		st, err := sc.Open(ctx, &t)
+		res := playMsg{req: id, idx: idx, seek: seek}
+		st, err := sc.Open(ctx, &t, offset)
+		res.track = t
 		if err != nil {
-			return playMsg{req: id, idx: idx, track: t, err: err}
+			res.err = err
+			return res
 		}
 		if req.Load() != id { // пользователь уже выбрал другой трек
 			st.Close()
 			return nil
 		}
-		if err := pl.Play(st, onEnd); err != nil {
-			return playMsg{req: id, idx: idx, track: t, err: err}
+		if err := pl.Play(st, st.Start, paused, onEnd); err != nil {
+			res.err = err
+			return res
 		}
-		return playMsg{req: id, idx: idx, track: t, preview: st.Preview}
+		res.preview = st.Preview
+		return res
 	})
+}
+
+// play запускает воспроизведение трека queue[idx] с начала.
+func (m *Model) play(idx int) tea.Cmd {
+	if idx < 0 || idx >= len(m.queue) {
+		return nil
+	}
+	m.cancelSeek()
+	t := m.queue[idx]
+	return m.open(t, idx, 0, false, false, "Загружаю "+t.Title)
 }
 
 func (m *Model) playFromList(i int) tea.Cmd {
@@ -197,6 +236,68 @@ func (m *Model) step(delta int) tea.Cmd {
 	return m.play(next)
 }
 
+// ---------- перемотка ----------
+
+func (m *Model) cancelSeek() {
+	m.seekPending, m.seeking = false, false
+	m.seekGen++
+}
+
+func (m *Model) seekBy(d time.Duration) tea.Cmd {
+	if m.now == nil || !m.playing && !m.seekPending && !m.seeking {
+		return nil
+	}
+	base := m.pos
+	if m.seekPending || m.seeking {
+		base = m.seekTarget
+	}
+	limit := m.now.Length() - time.Second
+	if m.preview {
+		limit = min(limit, 29*time.Second)
+	}
+	target := min(max(0, base+d), max(0, limit))
+	m.seekTarget, m.pos = target, target
+	m.seekPending = true
+	m.seekGen++
+	gen := m.seekGen
+	return tea.Tick(seekDelay, func(time.Time) tea.Msg { return seekFireMsg{gen: gen} })
+}
+
+func (m *Model) fireSeek() tea.Cmd {
+	m.seekPending, m.seeking = false, true
+	t := *m.now
+	return m.open(t, m.queueIdx, m.seekTarget, m.paused, true, "Перематываю на "+fmtDur(m.seekTarget))
+}
+
+// ---------- история ----------
+
+func (m *Model) showHistory() {
+	if m.view == viewSearch {
+		m.searchCursor = m.cursor
+	}
+	entries := m.hist.Entries()
+	m.view = viewHistory
+	m.tracks = make([]soundcloud.Track, len(entries))
+	m.playedAt = make([]time.Time, len(entries))
+	for i, e := range entries {
+		m.tracks[i], m.playedAt[i] = e.Track, e.PlayedAt
+	}
+	m.cursor, m.offset = 0, 0
+	if len(entries) == 0 {
+		m.setStatus("История пуста — здесь появятся прослушанные треки", false)
+	} else {
+		m.setStatus(fmt.Sprintf("Треков в истории: %d", len(entries)), false)
+	}
+}
+
+func (m *Model) showSearch() {
+	m.view = viewSearch
+	m.tracks, m.playedAt = m.results, nil
+	m.cursor, m.offset = min(m.searchCursor, max(0, len(m.tracks)-1)), 0
+	m.clampScroll()
+	m.setStatus("", false)
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -205,7 +306,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampScroll()
 
 	case tickMsg:
-		m.pos, m.paused, m.playing = m.pl.State()
+		pos, paused, playing := m.pl.State()
+		if !m.seekPending && !m.seeking {
+			m.pos = pos
+		}
+		m.paused, m.playing = paused, playing
 		return m, tick()
 
 	case spinner.TickMsg:
@@ -216,6 +321,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 
+	case seekFireMsg:
+		if msg.gen != m.seekGen || !m.seekPending || m.now == nil {
+			return m, nil
+		}
+		return m, m.fireSeek()
+
 	case searchMsg:
 		m.loading = ""
 		switch {
@@ -224,7 +335,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case len(msg.tracks) == 0:
 			m.setStatus("Ничего не найдено", false)
 		default:
-			m.tracks, m.cursor, m.offset = msg.tracks, 0, 0
+			m.results = msg.tracks
+			m.view, m.tracks, m.playedAt = viewSearch, msg.tracks, nil
+			m.cursor, m.offset = 0, 0
 			m.setStatus(fmt.Sprintf("Найдено треков: %d", len(msg.tracks)), false)
 			if msg.autoplay {
 				return m, m.playFromList(0)
@@ -236,8 +349,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = ""
+		if msg.seek {
+			m.seeking = false
+			if msg.err != nil {
+				m.setStatus("Не удалось перемотать: "+oneLine(msg.err), true)
+			}
+			return m, nil
+		}
 		if msg.err != nil {
-			text := strings.ReplaceAll(msg.err.Error(), "\n", "; ")
+			text := oneLine(msg.err)
 			if errors.Is(msg.err, soundcloud.ErrNeedFFmpeg) { // остальные треки упадут так же
 				m.setStatus(text, true)
 				return m, nil
@@ -255,10 +375,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		t := msg.track
 		m.now, m.queueIdx, m.preview, m.skips = &t, msg.idx, msg.preview, 0
+		m.pos = 0
 		if msg.idx < len(m.queue) {
 			m.queue[msg.idx] = t
 		}
-		if msg.preview {
+		if err := m.hist.Add(t, time.Now()); err != nil {
+			m.setStatus("Не удалось сохранить историю: "+err.Error(), true)
+		} else if msg.preview {
 			m.setStatus("Доступен только 30-секундный фрагмент", true)
 		} else {
 			m.setStatus("", false)
@@ -272,6 +395,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+func oneLine(err error) string { return strings.ReplaceAll(err.Error(), "\n", "; ") }
 
 func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 	if k.String() == "ctrl+c" {
@@ -306,10 +431,23 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 	case "q":
 		m.pl.Stop()
 		return tea.Quit
-	case "/", "s", "tab":
+	case "/", "s":
+		if m.view == viewHistory {
+			m.showSearch()
+		}
 		m.input.Focus()
 		m.input.CursorEnd()
 		return textinput.Blink
+	case "h", "tab":
+		if m.view == viewHistory {
+			m.showSearch()
+		} else {
+			m.showHistory()
+		}
+	case "esc":
+		if m.view == viewHistory {
+			m.showSearch()
+		}
 	case "up", "k":
 		m.moveCursor(-1)
 	case "down", "j":
@@ -328,9 +466,21 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		if m.playing {
 			m.paused = m.pl.TogglePause()
 		}
-	case "n", "right":
+	case "right", "l":
+		return m.seekBy(seekStep)
+	case "left":
+		return m.seekBy(-seekStep)
+	case "shift+right", "L":
+		return m.seekBy(seekBigStep)
+	case "shift+left", "H":
+		return m.seekBy(-seekBigStep)
+	case "0":
+		if m.now != nil {
+			return m.seekBy(-m.now.Length())
+		}
+	case "n":
 		return m.step(+1)
-	case "b", "left":
+	case "b":
 		return m.step(-1)
 	case "+", "=":
 		m.volume = m.pl.ChangeVolume(+1)
@@ -341,7 +491,7 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 			m.setStatus(m.now.PermalinkURL, false)
 		}
 	case "?":
-		m.setStatus("enter — играть · пробел — пауза · n/b — след/пред · +/- — громкость · c — ссылка · / — поиск · q — выход", false)
+		m.setStatus("enter — играть · пробел — пауза · ←/→ — перемотка 10 с (shift — 30 с) · 0 — в начало · n/b — след/пред · +/- — громкость · h — история · / — поиск · q — выход", false)
 	}
 	return nil
 }

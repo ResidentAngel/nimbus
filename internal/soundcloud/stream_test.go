@@ -1,11 +1,26 @@
 package soundcloud
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func tc(proto, mime string, snipped bool) Transcoding {
 	t := Transcoding{URL: proto + mime, Snipped: snipped}
 	t.Format.Protocol, t.Format.MimeType = proto, mime
 	return t
+}
+
+func TestSkipSegments(t *testing.T) {
+	segs := []segment{{"a", 10 * time.Second}, {"b", 10 * time.Second}, {"c", 10 * time.Second}}
+	rest, start := skipSegments(segs, 25*time.Second)
+	if len(rest) != 1 || rest[0].url != "c" || start != 20*time.Second {
+		t.Fatalf("%v %v", rest, start)
+	}
+	rest, start = skipSegments(segs, time.Hour) // за концом — остаётся последний сегмент
+	if len(rest) != 1 || start != 20*time.Second {
+		t.Fatalf("%v %v", rest, start)
+	}
 }
 
 func TestCandidates(t *testing.T) {

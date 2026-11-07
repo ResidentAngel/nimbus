@@ -26,7 +26,7 @@ func TestLiveSearchAndStream(t *testing.T) {
 		for _, tc := range tr.Media.Transcodings {
 			t.Logf("  %s: %s %s snipped=%v", tr.Title, tc.Format.Protocol, tc.Format.MimeType, tc.Snipped)
 		}
-		st, err := c.Open(ctx, tr)
+		st, err := c.Open(ctx, tr, 0)
 		if err != nil {
 			t.Logf("skip %s: %v", tr, err)
 			continue

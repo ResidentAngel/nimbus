@@ -10,14 +10,17 @@ import (
 	"net/url"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Stream — MP3-поток трека, готовый к декодированию.
 type Stream struct {
 	io.ReadCloser
-	Preview bool   // доступен только 30-секундный фрагмент
-	Source  string // какой транскодинг используется
+	Preview bool          // доступен только 30-секундный фрагмент
+	Source  string        // какой транскодинг используется
+	Start   time.Duration // с какого места трека реально начинается поток
 }
 
 // isMP3 — именно audio/mpeg (не audio/mpegurl: так помечен адаптивный abr-поток).
@@ -65,9 +68,9 @@ func candidates(ts []Transcoding, ffmpeg bool) (out []Transcoding, needFFmpeg bo
 	return out, needFFmpeg
 }
 
-// Open возвращает аудиопоток трека в формате MP3. Перебирает доступные форматы,
-// пока один не откроется. Данные подкачиваются в фоне с опережением.
-func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
+// Open возвращает аудиопоток трека в формате MP3, начиная с позиции offset.
+// Перебирает доступные форматы, пока один не откроется. Данные подкачиваются в фоне с опережением.
+func (c *Client) Open(ctx context.Context, t *Track, offset time.Duration) (*Stream, error) {
 	if t.Policy == "BLOCK" {
 		return nil, errors.New("трек заблокирован в вашем регионе")
 	}
@@ -87,7 +90,7 @@ func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
 
 	var errs []error
 	for _, tc := range list {
-		st, err := c.openTranscoding(ctx, t, tc)
+		st, err := c.openTranscoding(ctx, t, tc, offset)
 		if err == nil {
 			c.logf("  -> playing %s %s", tc.Format.Protocol, tc.Format.MimeType)
 			return st, nil
@@ -107,7 +110,10 @@ func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
 	return nil, errors.Join(errs...)
 }
 
-func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding) (*Stream, error) {
+func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding, offset time.Duration) (*Stream, error) {
+	if tc.Format.Protocol == "progressive" && offset > 0 {
+		return nil, errors.New("формат не поддерживает перемотку")
+	}
 	q := url.Values{}
 	if t.TrackAuthorization != "" {
 		q.Set("track_authorization", t.TrackAuthorization)
@@ -122,7 +128,10 @@ func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding) 
 		return nil, errors.New("пустая ссылка на поток")
 	}
 
-	var produce func(ctx context.Context, emit emitFunc) error
+	var (
+		produce func(ctx context.Context, emit emitFunc) error
+		start   time.Duration
+	)
 	switch {
 	case tc.Format.Protocol == "progressive":
 		produce = func(ctx context.Context, emit emitFunc) error { return c.copyURL(ctx, loc.URL, emit) }
@@ -132,14 +141,17 @@ func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding) 
 		if err != nil {
 			return nil, err
 		}
+		segments, start = skipSegments(segments, offset)
 		produce = func(ctx context.Context, emit emitFunc) error { return c.copySegments(ctx, segments, emit) }
 	default:
-		produce = func(ctx context.Context, emit emitFunc) error { return copyFFmpeg(ctx, loc.URL, emit) }
+		start = offset
+		produce = func(ctx context.Context, emit emitFunc) error { return copyFFmpeg(ctx, loc.URL, offset, emit) }
 	}
 	return &Stream{
 		ReadCloser: newPrefetcher(256, produce), // до ~8 МБ опережения
 		Preview:    tc.Snipped,
 		Source:     tc.Format.Protocol + " " + tc.Format.MimeType,
+		Start:      start,
 	}, nil
 }
 
@@ -179,8 +191,24 @@ func (c *Client) copyURL(ctx context.Context, u string, emit emitFunc) error {
 	return copyReader(resp.Body, emit)
 }
 
-// hlsSegments скачивает m3u8-плейлист и возвращает адреса сегментов.
-func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int) ([]string, error) {
+type segment struct {
+	url string
+	dur time.Duration
+}
+
+// skipSegments пропускает сегменты, целиком лежащие до offset.
+// Возвращает оставшиеся сегменты и время начала первого из них.
+func skipSegments(segs []segment, offset time.Duration) ([]segment, time.Duration) {
+	var start time.Duration
+	for len(segs) > 1 && start+segs[0].dur <= offset {
+		start += segs[0].dur
+		segs = segs[1:]
+	}
+	return segs, start
+}
+
+// hlsSegments скачивает m3u8-плейлист и возвращает сегменты с длительностями.
+func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int) ([]segment, error) {
 	base, err := url.Parse(playlistURL)
 	if err != nil {
 		return nil, err
@@ -189,10 +217,20 @@ func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int)
 	if err != nil {
 		return nil, err
 	}
-	var segments []string
+	var (
+		segments []segment
+		dur      time.Duration
+	)
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
+		if v, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
+			v, _, _ = strings.Cut(v, ",")
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				dur = time.Duration(f * float64(time.Second))
+			}
+			continue
+		}
 		if strings.HasPrefix(line, "#EXT-X-KEY") && !strings.Contains(line, "METHOD=NONE") {
 			return nil, errors.New("поток зашифрован")
 		}
@@ -206,7 +244,8 @@ func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int)
 		if strings.Contains(ref.Path, ".m3u8") && depth == 0 { // master-плейлист
 			return c.hlsSegments(ctx, ref.String(), depth+1)
 		}
-		segments = append(segments, ref.String())
+		segments = append(segments, segment{url: ref.String(), dur: dur})
+		dur = 0
 	}
 	if len(segments) == 0 {
 		return nil, errors.New("пустой HLS-плейлист")
@@ -214,8 +253,9 @@ func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int)
 	return segments, nil
 }
 
-func (c *Client) copySegments(ctx context.Context, segments []string, emit emitFunc) error {
-	for _, seg := range segments {
+func (c *Client) copySegments(ctx context.Context, segments []segment, emit emitFunc) error {
+	for _, s := range segments {
+		seg := s.url
 		var err error
 		for try := 0; try < 3; try++ {
 			if err = c.copyURL(ctx, seg, emit); err == nil || ctx.Err() != nil {
@@ -230,9 +270,14 @@ func (c *Client) copySegments(ctx context.Context, segments []string, emit emitF
 }
 
 // copyFFmpeg перекодирует произвольный незашифрованный HLS (AAC/Opus) в MP3.
-func copyFFmpeg(ctx context.Context, u string, emit emitFunc) error {
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-loglevel", "error", "-i", u,
-		"-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "pipe:1")
+// offset > 0 — начать с этой позиции (ffmpeg сам перематывает HLS по сегментам).
+func copyFFmpeg(ctx context.Context, u string, offset time.Duration, emit emitFunc) error {
+	args := []string{"-loglevel", "error"}
+	if offset > 0 {
+		args = append(args, "-ss", strconv.FormatFloat(offset.Seconds(), 'f', 3, 64))
+	}
+	args = append(args, "-i", u, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "pipe:1")
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

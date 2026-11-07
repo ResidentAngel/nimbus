@@ -53,7 +53,8 @@ func (m *Model) View() string {
 	if m.input.Focused() {
 		search = search.BorderForeground(accent)
 	}
-	b.WriteString(search.Width(w-2).Render(m.input.View()) + "\n\n")
+	b.WriteString(search.Width(w-2).Render(m.input.View()) + "\n")
+	b.WriteString(m.tabs() + "\n")
 
 	b.WriteString(m.list(w) + "\n")
 	b.WriteString(boxStyle.Width(w-2).Render(m.nowPlaying(inner)) + "\n")
@@ -73,6 +74,17 @@ func (m *Model) header(w int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+func (m *Model) tabs() string {
+	tab := func(name string, active bool) string {
+		if active {
+			return accentStyle.Bold(true).Render("● " + name)
+		}
+		return dimStyle.Render("○ " + name)
+	}
+	return " " + tab("Поиск", m.view == viewSearch) + "   " + tab("История", m.view == viewHistory) +
+		faintStyle.Render("   (h — переключить)")
+}
+
 func volumeBar(pct, n int) string {
 	full := pct * n / 100
 	return accentStyle.Render(strings.Repeat("▮", full)) + faintStyle.Render(strings.Repeat("▯", n-full))
@@ -82,7 +94,11 @@ func (m *Model) list(w int) string {
 	h := m.listHeight()
 	lines := make([]string, 0, h)
 	if len(m.tracks) == 0 {
-		lines = append(lines, dimStyle.Render("  Здесь появятся результаты поиска."))
+		empty := "  Здесь появятся результаты поиска."
+		if m.view == viewHistory {
+			empty = "  Здесь появятся прослушанные треки."
+		}
+		lines = append(lines, dimStyle.Render(empty))
 	}
 	numW := len(fmt.Sprint(len(m.tracks)))
 	rows := m.visibleRows()
@@ -97,8 +113,11 @@ func (m *Model) list(w int) string {
 			}
 		}
 		dur := fmtDur(t.Length())
+		if m.view == viewHistory && i < len(m.playedAt) {
+			dur = fmtAgo(m.playedAt[i], time.Now())
+		}
 		num := fmt.Sprintf("%*d  ", numW, i+1)
-		titleW := max(5, w-2-len(num)-len(dur)-3)
+		titleW := max(5, w-2-len(num)-runewidth.StringWidth(dur)-3)
 		artist := t.User.Username
 		title := runewidth.Truncate(artist+" — "+t.Title, titleW, "…")
 		title = runewidth.FillRight(title, titleW)
@@ -163,8 +182,8 @@ func progressBar(pos, total time.Duration, w int) string {
 
 func (m *Model) helpLine(w int) string {
 	keys := [][2]string{
-		{"/", "поиск"}, {"enter", "играть"}, {"␣", "пауза"}, {"n/b", "след/пред"},
-		{"+/-", "громкость"}, {"c", "ссылка"}, {"q", "выход"},
+		{"/", "поиск"}, {"enter", "играть"}, {"␣", "пауза"}, {"←/→", "перемотка"},
+		{"n/b", "след/пред"}, {"+/-", "громкость"}, {"h", "история"}, {"q", "выход"},
 	}
 	if m.input.Focused() {
 		keys = [][2]string{{"enter", "найти"}, {"esc", "к списку"}, {"ctrl+c", "выход"}}
@@ -191,6 +210,26 @@ func (m *Model) statusLine(w int) string {
 		return errStyle.Render(s)
 	}
 	return dimStyle.Render(s)
+}
+
+// fmtAgo — короткая подпись «когда играл» для истории.
+func fmtAgo(t, now time.Time) string {
+	d := now.Sub(t)
+	day := func(x time.Time) string { return x.Format("2006-01-02") }
+	switch {
+	case d < time.Minute:
+		return "только что"
+	case d < time.Hour:
+		return fmt.Sprintf("%d мин назад", int(d.Minutes()))
+	case day(t) == day(now):
+		return "сегодня " + t.Format("15:04")
+	case day(t) == day(now.AddDate(0, 0, -1)):
+		return "вчера " + t.Format("15:04")
+	case t.Year() == now.Year():
+		return t.Format("02.01 15:04")
+	default:
+		return t.Format("02.01.2006")
+	}
 }
 
 func fmtDur(d time.Duration) string {
