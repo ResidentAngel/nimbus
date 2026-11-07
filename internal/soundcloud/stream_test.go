@@ -16,6 +16,10 @@ func TestCandidates(t *testing.T) {
 		tc("progressive", "audio/mpeg", true),
 	}
 
+	if isMP3(tc("hls", "audio/mpegurl", false)) {
+		t.Fatal("audio/mpegurl — не MP3")
+	}
+
 	got, need := candidates(ts, false)
 	if !need || len(got) != 2 || got[0].Format.Protocol != "hls" || got[1].Format.Protocol != "progressive" {
 		t.Fatalf("без ffmpeg: %+v need=%v", got, need)

@@ -20,7 +20,11 @@ type Stream struct {
 	Source  string // какой транскодинг используется
 }
 
-func isMP3(t Transcoding) bool { return strings.HasPrefix(t.Format.MimeType, "audio/mpeg") }
+// isMP3 — именно audio/mpeg (не audio/mpegurl: так помечен адаптивный abr-поток).
+func isMP3(t Transcoding) bool {
+	mime, _, _ := strings.Cut(t.Format.MimeType, ";")
+	return strings.TrimSpace(mime) == "audio/mpeg"
+}
 
 func hasFFmpeg() bool { _, err := exec.LookPath("ffmpeg"); return err == nil }
 
