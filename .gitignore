@@ -1,0 +1,5 @@
+*.exe
+/nimbus
+/dist/
+*.test
+*.out
