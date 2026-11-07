@@ -24,7 +24,7 @@ func key(s string) tea.KeyMsg {
 }
 
 func TestSeekAccumulatesAndClamps(t *testing.T) {
-	m := New(nil, &player.Player{}, nil, "")
+	m := New(nil, &player.Player{}, nil, nil, "")
 	m.input.Blur()
 	tr := fakeTracks(1)[0] // ~3:00
 	m.now, m.queue, m.queueIdx, m.playing = &tr, []soundcloud.Track{tr}, 0, true
@@ -60,7 +60,7 @@ func TestHistoryView(t *testing.T) {
 	for i, tr := range fakeTracks(3) {
 		h.Add(tr, now.Add(-time.Duration(3-i)*time.Hour*30))
 	}
-	m := New(nil, &player.Player{}, h, "")
+	m := New(nil, &player.Player{}, h, nil, "")
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.Update(searchMsg{tracks: fakeTracks(5)})
 	m.input.Blur()

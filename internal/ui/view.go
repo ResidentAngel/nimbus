@@ -25,6 +25,7 @@ var (
 	selStyle    = lipgloss.NewStyle().Background(accentBg).Foreground(text)
 	keyStyle    = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	errStyle    = lipgloss.NewStyle().Foreground(errColor)
+	heartStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4D6D"))
 	boxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(faint).Padding(0, 1)
 )
 
@@ -81,8 +82,12 @@ func (m *Model) tabs() string {
 		}
 		return dimStyle.Render("○ " + name)
 	}
-	return " " + tab("Поиск", m.view == viewSearch) + "   " + tab("История", m.view == viewHistory) +
-		faintStyle.Render("   (h — переключить)")
+	s := " " + tab("Поиск", m.view == viewSearch) + "   " + tab("История", m.view == viewHistory) +
+		"   " + tab(fmt.Sprintf("Лайки %d", m.likes.Len()), m.view == viewLikes)
+	if hint := faintStyle.Render("   (Tab — переключить)"); lipgloss.Width(s+hint) <= m.width {
+		s += hint
+	}
+	return s
 }
 
 func volumeBar(pct, n int) string {
@@ -95,8 +100,11 @@ func (m *Model) list(w int) string {
 	lines := make([]string, 0, h)
 	if len(m.tracks) == 0 {
 		empty := "  Здесь появятся результаты поиска."
-		if m.view == viewHistory {
+		switch m.view {
+		case viewHistory:
 			empty = "  Здесь появятся прослушанные треки."
+		case viewLikes:
+			empty = "  Нажмите f на любом треке, чтобы добавить его сюда."
 		}
 		lines = append(lines, dimStyle.Render(empty))
 	}
@@ -113,11 +121,15 @@ func (m *Model) list(w int) string {
 			}
 		}
 		dur := fmtDur(t.Length())
-		if m.view == viewHistory && i < len(m.playedAt) {
+		if m.view != viewSearch && i < len(m.playedAt) {
 			dur = fmtAgo(m.playedAt[i], time.Now())
 		}
-		num := fmt.Sprintf("%*d  ", numW, i+1)
-		titleW := max(5, w-2-len(num)-runewidth.StringWidth(dur)-3)
+		num := fmt.Sprintf("%*d ", numW, i+1)
+		heart := "  "
+		if m.likes.Has(t.ID) {
+			heart = "♥ "
+		}
+		titleW := max(5, w-2-len(num)-2-runewidth.StringWidth(dur)-3)
 		artist := t.User.Username
 		title := runewidth.Truncate(artist+" — "+t.Title, titleW, "…")
 		title = runewidth.FillRight(title, titleW)
@@ -125,12 +137,12 @@ func (m *Model) list(w int) string {
 		var row string
 		switch {
 		case i == m.cursor && !m.input.Focused():
-			row = selStyle.Render(mark + num + title + " " + dur + " ")
+			row = selStyle.Render(mark + num + heart + title + " " + dur + " ")
 			row = accentStyle.Render("▌") + row
 		case isNow:
-			row = " " + accentStyle.Render(mark+num+title) + " " + dimStyle.Render(dur)
+			row = " " + accentStyle.Render(mark+num+heart+title) + " " + dimStyle.Render(dur)
 		default:
-			row = " " + mark + dimStyle.Render(num) + title + " " + dimStyle.Render(dur)
+			row = " " + mark + dimStyle.Render(num) + heartStyle.Render(heart) + title + " " + dimStyle.Render(dur)
 		}
 		lines = append(lines, row)
 	}
@@ -153,7 +165,10 @@ func (m *Model) nowPlaying(w int) string {
 	if m.paused {
 		icon = accentStyle.Render("⏸ ")
 	}
-	title := runewidth.Truncate(m.now.Title, w-3, "…")
+	title := runewidth.Truncate(m.now.Title, w-5, "…")
+	if m.likes.Has(m.now.ID) {
+		title += heartStyle.Render(" ♥")
+	}
 	sub := m.now.User.Username
 	if m.preview {
 		sub += " · превью 30 с"
@@ -183,7 +198,7 @@ func progressBar(pos, total time.Duration, w int) string {
 func (m *Model) helpLine(w int) string {
 	keys := [][2]string{
 		{"/", "поиск"}, {"enter", "играть"}, {"␣", "пауза"}, {"←/→", "перемотка"},
-		{"n/b", "след/пред"}, {"+/-", "громкость"}, {"h", "история"}, {"q", "выход"},
+		{"f", "лайк"}, {"n/b", "след/пред"}, {"tab", "вкладки"}, {"+/-", "громкость"}, {"q", "выход"},
 	}
 	if m.input.Focused() {
 		keys = [][2]string{{"enter", "найти"}, {"esc", "к списку"}, {"ctrl+c", "выход"}}

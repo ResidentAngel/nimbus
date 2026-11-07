@@ -28,7 +28,7 @@ func fakeTracks(n int) []soundcloud.Track {
 // и высота совпадает с размером окна.
 func TestViewFitsTerminal(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {120, 40}, {50, 16}} {
-		m := New(nil, &player.Player{}, nil, "")
+		m := New(nil, &player.Player{}, nil, nil, "")
 		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		m.Update(searchMsg{tracks: fakeTracks(60)})
 		m.input.Blur()

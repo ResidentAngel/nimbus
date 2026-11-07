@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ResidentAngel/nimbus/internal/history"
+	"github.com/ResidentAngel/nimbus/internal/likes"
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 )
@@ -30,6 +31,7 @@ type viewMode int
 const (
 	viewSearch viewMode = iota
 	viewHistory
+	viewLikes
 )
 
 type (
@@ -52,16 +54,17 @@ type (
 )
 
 type Model struct {
-	sc   *soundcloud.Client
-	pl   *player.Player
-	hist *history.Store
+	sc    *soundcloud.Client
+	pl    *player.Player
+	hist  *history.Store
+	likes *likes.Store
 
 	input textinput.Model
 	spin  spinner.Model
 
 	view           viewMode
 	tracks         []soundcloud.Track // то, что сейчас показано в списке
-	playedAt       []time.Time        // для истории: когда играл каждый трек из tracks
+	playedAt       []time.Time        // для истории и лайков: когда трек играл / был лайкнут
 	results        []soundcloud.Track // последние результаты поиска
 	cursor, offset int
 	searchCursor   int
@@ -94,7 +97,7 @@ type Model struct {
 }
 
 // New создаёт модель. initial — стартовый поисковый запрос или ссылка (может быть пустым).
-func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, initial string) *Model {
+func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, lk *likes.Store, initial string) *Model {
 	in := textinput.New()
 	in.Prompt = "  "
 	in.Placeholder = "поиск треков или ссылка soundcloud.com…"
@@ -109,12 +112,15 @@ func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, initial 
 	if hist == nil {
 		hist = history.Open("")
 	}
+	if lk == nil {
+		lk, _ = likes.Open("")
+	}
 	m := &Model{
-		sc: sc, pl: pl, hist: hist, input: in, spin: sp,
+		sc: sc, pl: pl, hist: hist, likes: lk, input: in, spin: sp,
 		queueIdx: -1, volume: pl.Volume(), initial: strings.TrimSpace(initial),
 		ended: make(chan struct{}, 1), req: new(atomic.Int64),
 		width: 80, height: 24,
-		status: "Нажмите / для поиска, h — история, ? — подсказка по клавишам",
+		status: "Нажмите / для поиска, f — лайк, Tab — вкладки, ? — подсказка по клавишам",
 	}
 	if m.initial == "" {
 		m.input.Focus()
@@ -271,31 +277,78 @@ func (m *Model) fireSeek() tea.Cmd {
 
 // ---------- история ----------
 
-func (m *Model) showHistory() {
-	if m.view == viewSearch {
+// showView переключает вкладку. Позиция в результатах поиска запоминается.
+func (m *Model) showView(v viewMode) {
+	if m.view == viewSearch && v != viewSearch {
 		m.searchCursor = m.cursor
 	}
-	entries := m.hist.Entries()
-	m.view = viewHistory
+	m.view = v
+	m.cursor, m.offset = 0, 0
+	switch v {
+	case viewSearch:
+		m.tracks, m.playedAt = m.results, nil
+		m.cursor = min(m.searchCursor, max(0, len(m.tracks)-1))
+		m.setStatus("", false)
+	case viewHistory:
+		entries := m.hist.Entries()
+		m.tracks = make([]soundcloud.Track, len(entries))
+		m.playedAt = make([]time.Time, len(entries))
+		for i, e := range entries {
+			m.tracks[i], m.playedAt[i] = e.Track, e.PlayedAt
+		}
+		if len(entries) == 0 {
+			m.setStatus("История пуста — здесь появятся прослушанные треки", false)
+		} else {
+			m.setStatus(fmt.Sprintf("Треков в истории: %d", len(entries)), false)
+		}
+	case viewLikes:
+		m.loadLikes()
+		if len(m.tracks) == 0 {
+			m.setStatus("Лайков пока нет — нажмите f на треке", false)
+		} else {
+			m.setStatus(fmt.Sprintf("Лайкнутых треков: %d", len(m.tracks)), false)
+		}
+	}
+	m.clampScroll()
+}
+
+func (m *Model) loadLikes() {
+	entries := m.likes.Entries()
 	m.tracks = make([]soundcloud.Track, len(entries))
 	m.playedAt = make([]time.Time, len(entries))
 	for i, e := range entries {
-		m.tracks[i], m.playedAt[i] = e.Track, e.PlayedAt
-	}
-	m.cursor, m.offset = 0, 0
-	if len(entries) == 0 {
-		m.setStatus("История пуста — здесь появятся прослушанные треки", false)
-	} else {
-		m.setStatus(fmt.Sprintf("Треков в истории: %d", len(entries)), false)
+		m.tracks[i], m.playedAt[i] = e.Track, e.LikedAt
 	}
 }
 
-func (m *Model) showSearch() {
-	m.view = viewSearch
-	m.tracks, m.playedAt = m.results, nil
-	m.cursor, m.offset = min(m.searchCursor, max(0, len(m.tracks)-1)), 0
-	m.clampScroll()
-	m.setStatus("", false)
+// toggleLike ставит/снимает лайк выбранному треку (или текущему, если список пуст).
+func (m *Model) toggleLike(current bool) {
+	var t *soundcloud.Track
+	switch {
+	case current && m.now != nil:
+		t = m.now
+	case !current && m.cursor < len(m.tracks):
+		t = &m.tracks[m.cursor]
+	case m.now != nil:
+		t = m.now
+	default:
+		return
+	}
+	liked, err := m.likes.Toggle(*t, time.Now())
+	if err != nil {
+		m.setStatus("Не удалось сохранить лайк: "+err.Error(), true)
+		return
+	}
+	if liked {
+		m.setStatus("♥ "+t.Title, false)
+	} else {
+		m.setStatus("Лайк снят: "+t.Title, false)
+	}
+	if m.view == viewLikes { // список лайков сразу отражает изменение
+		m.loadLikes()
+		m.cursor = min(m.cursor, max(0, len(m.tracks)-1))
+		m.clampScroll()
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -432,22 +485,30 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		m.pl.Stop()
 		return tea.Quit
 	case "/", "s":
-		if m.view == viewHistory {
-			m.showSearch()
+		if m.view != viewSearch {
+			m.showView(viewSearch)
 		}
 		m.input.Focus()
 		m.input.CursorEnd()
 		return textinput.Blink
-	case "h", "tab":
+	case "tab":
+		m.showView((m.view + 1) % 3)
+	case "shift+tab":
+		m.showView((m.view + 2) % 3)
+	case "h":
 		if m.view == viewHistory {
-			m.showSearch()
+			m.showView(viewSearch)
 		} else {
-			m.showHistory()
+			m.showView(viewHistory)
 		}
 	case "esc":
-		if m.view == viewHistory {
-			m.showSearch()
+		if m.view != viewSearch {
+			m.showView(viewSearch)
 		}
+	case "f":
+		m.toggleLike(false)
+	case "F":
+		m.toggleLike(true)
 	case "up", "k":
 		m.moveCursor(-1)
 	case "down", "j":
@@ -491,7 +552,7 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 			m.setStatus(m.now.PermalinkURL, false)
 		}
 	case "?":
-		m.setStatus("enter — играть · пробел — пауза · ←/→ — перемотка 10 с (shift — 30 с) · 0 — в начало · n/b — след/пред · +/- — громкость · h — история · / — поиск · q — выход", false)
+		m.setStatus("enter — играть · пробел — пауза · ←/→ — перемотка 10 с (shift — 30 с) · 0 — в начало · n/b — след/пред · f — лайк выбранному (F — текущему) · Tab — вкладки · h — история · +/- — громкость · / — поиск · q — выход", false)
 	}
 	return nil
 }
