@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	apiBase   = "https://api-v2.soundcloud.com"
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+	defaultAPIBase = "https://api-v2.soundcloud.com"
+	userAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 )
 
 // ErrNoStream — у трека нет потока, который мы умеем играть
@@ -69,6 +69,7 @@ type Client struct {
 	http     *http.Client
 	mu       sync.Mutex
 	clientID string
+	apiBase  string
 	fixedID  bool // client_id задан пользователем явно — не перевыпускаем
 
 	// Log, если задан, получает отладочные сообщения (выбор формата, ошибки потоков).
@@ -91,6 +92,7 @@ func New(clientID string) *Client {
 			IdleConnTimeout:       60 * time.Second,
 		}},
 		clientID: clientID,
+		apiBase:  defaultAPIBase,
 		fixedID:  clientID != "",
 	}
 }
@@ -187,7 +189,7 @@ func (c *Client) fetchText(ctx context.Context, u string) (string, error) {
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, q url.Values, out any) error {
 	if !strings.HasPrefix(endpoint, "http") {
-		endpoint = apiBase + endpoint
+		endpoint = c.apiBase + endpoint
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -240,8 +242,21 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]Track, 
 	return res.Collection, nil
 }
 
-// Resolve превращает ссылку soundcloud.com (трек, плейлист/альбом или профиль) в список треков.
+// Resolve превращает ссылку soundcloud.com (трек, плейлист/альбом, профиль
+// или страницу лайков профиля) в список треков.
 func (c *Client) Resolve(ctx context.Context, link string) ([]Track, error) {
+	link, err := c.canonicalURL(ctx, link)
+	if err != nil {
+		return nil, err
+	}
+	if profile, ok := LikesProfileURL(link); ok {
+		liked, err := c.UserLikes(ctx, profile, nil)
+		tracks := make([]Track, len(liked))
+		for i, l := range liked {
+			tracks[i] = l.Track
+		}
+		return tracks, err
+	}
 	var raw json.RawMessage
 	if err := c.getJSON(ctx, "/resolve", url.Values{"url": {link}}, &raw); err != nil {
 		return nil, err

@@ -100,9 +100,15 @@ nimbus https://soundcloud.com/user/sets/playlist
 ```bash
 nimbus likes export likes.json      # на старом устройстве
 nimbus likes import likes.json      # на новом: добавит недостающие, дубли пропустит
+nimbus likes import https://soundcloud.com/ник/likes   # забрать лайки своего профиля SoundCloud
 nimbus likes list                   # посмотреть список
 nimbus likes path                   # где лежит рабочий файл
 ```
+
+Импорт по ссылке берёт **публичные** лайки любого профиля (вход в аккаунт не нужен,
+скрытые лайки недоступны). Подойдёт и короткая ссылка `on.soundcloud.com/…` из приложения.
+Если вставить ссылку `soundcloud.com/ник/likes` в строку поиска плеера, лайки профиля
+откроются списком — их можно сразу слушать.
 
 Файл экспорта — обычный JSON (`{"app":"nimbus","version":1,"likes":[...]}`),
 его можно хранить в облаке или в git. Токены и временные ссылки на потоки

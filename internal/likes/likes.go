@@ -167,6 +167,12 @@ func (s *Store) Import(path string) (added int, err error) {
 	if err != nil {
 		return 0, err
 	}
+	return s.Add(ls)
+}
+
+// Add добавляет сразу несколько лайков (например, загруженных из профиля SoundCloud).
+// Уже лайкнутые треки пропускаются. Возвращает число новых.
+func (s *Store) Add(ls []Like) (added int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	added = s.merge(ls)

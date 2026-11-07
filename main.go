@@ -7,11 +7,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -80,10 +82,45 @@ func run() int {
 	return 0
 }
 
+// importFromProfile загружает публичные лайки профиля SoundCloud в локальные лайки.
+func importFromProfile(lk *likes.Store, link string) int {
+	if !strings.HasPrefix(link, "http") {
+		link = "https://" + link
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	fmt.Println("Загружаю лайки профиля…")
+	sc := soundcloud.New(os.Getenv("SC_CLIENT_ID"))
+	liked, err := sc.UserLikes(ctx, link, func(n int) { fmt.Printf("\r  получено треков: %d", n) })
+	fmt.Println()
+	if err != nil && len(liked) == 0 {
+		fmt.Fprintln(os.Stderr, "ошибка:", err)
+		return 1
+	}
+	if err != nil { // часть страниц загрузилась — сохраняем, что есть
+		fmt.Fprintln(os.Stderr, "внимание: загружены не все лайки:", err)
+	}
+
+	ls := make([]likes.Like, len(liked))
+	for i, l := range liked {
+		ls[i] = likes.Like{Track: l.Track, LikedAt: l.LikedAt}
+	}
+	added, err := lk.Add(ls)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "не удалось сохранить лайки:", err)
+		return 1
+	}
+	fmt.Printf("В профиле лайкнутых треков: %d, добавлено новых: %d (всего у вас: %d)\n", len(liked), added, lk.Len())
+	return 0
+}
+
 const likesUsage = `Лайки хранятся локально и переносятся одним JSON-файлом.
 
   nimbus likes export [файл]   сохранить лайки в файл (по умолчанию nimbus-likes.json)
   nimbus likes import <файл>   добавить лайки из файла (уже лайкнутые пропускаются)
+  nimbus likes import <ссылка> забрать публичные лайки профиля SoundCloud,
+                               например https://soundcloud.com/ник/likes
   nimbus likes list            показать лайкнутые треки
   nimbus likes path            где лежит файл лайков`
 
@@ -114,10 +151,14 @@ func likesCmd(args []string) int {
 		fmt.Println("Перенесите файл на другое устройство и выполните: nimbus likes import " + out)
 	case "import":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "укажите файл: nimbus likes import <файл>")
+			fmt.Fprintln(os.Stderr, "укажите файл или ссылку: nimbus likes import <файл | soundcloud.com/ник/likes>")
 			return 2
 		}
-		added, err := lk.Import(args[1])
+		src := args[1]
+		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.Contains(src, "soundcloud.com/") {
+			return importFromProfile(lk, src)
+		}
+		added, err := lk.Import(src)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ошибка импорта:", err)
 			return 1
