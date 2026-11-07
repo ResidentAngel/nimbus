@@ -127,6 +127,9 @@ func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding, 
 	if loc.URL == "" {
 		return nil, errors.New("пустая ссылка на поток")
 	}
+	if u, err := url.Parse(loc.URL); err == nil {
+		c.logf("  stream host: %s", u.Host) // пригодится, чтобы добавить домен в обход блокировок
+	}
 
 	var (
 		produce func(ctx context.Context, emit emitFunc) error
