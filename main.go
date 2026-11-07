@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,7 +123,35 @@ const likesUsage = `Лайки хранятся локально и перено
   nimbus likes import <ссылка> забрать публичные лайки профиля SoundCloud,
                                например https://soundcloud.com/ник/likes
   nimbus likes list            показать лайкнутые треки
-  nimbus likes path            где лежит файл лайков`
+  nimbus likes remove <N|ссылка> …  снять лайк: номер из list или ссылка на трек
+  nimbus likes path            где лежит файл лайков
+
+В плеере лайк ставится и снимается клавишей f (F — для трека, который играет).`
+
+// findLike ищет лайк по номеру из `likes list` или по ссылке на трек.
+func findLike(entries []likes.Like, arg string) (likes.Like, bool) {
+	if n, err := strconv.Atoi(arg); err == nil {
+		if n >= 1 && n <= len(entries) {
+			return entries[n-1], true
+		}
+		return likes.Like{}, false
+	}
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s, _, _ = strings.Cut(s, "?")
+		s = strings.TrimSuffix(s, "/")
+		for _, p := range []string{"https://", "http://", "www.", "m."} {
+			s = strings.TrimPrefix(s, p)
+		}
+		return s
+	}
+	for _, e := range entries {
+		if e.Track.PermalinkURL != "" && norm(e.Track.PermalinkURL) == norm(arg) {
+			return e, true
+		}
+	}
+	return likes.Like{}, false
+}
 
 func likesCmd(args []string) int {
 	if len(args) == 0 {
@@ -172,6 +201,27 @@ func likesCmd(args []string) int {
 		for i, e := range entries {
 			fmt.Printf("%3d. %s  %s\n", i+1, e.Track, e.Track.PermalinkURL)
 		}
+	case "remove", "rm", "unlike":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "укажите, что убрать: nimbus likes remove <номер из list | ссылка на трек> …")
+			return 2
+		}
+		entries := lk.Entries() // номера — как в list на момент запуска
+		code := 0
+		for _, arg := range args[1:] {
+			e, ok := findLike(entries, arg)
+			if !ok {
+				fmt.Fprintln(os.Stderr, "не найден среди лайков:", arg)
+				code = 1
+				continue
+			}
+			if _, err := lk.Remove(e.Track.ID); err != nil {
+				fmt.Fprintln(os.Stderr, "ошибка:", err)
+				return 1
+			}
+			fmt.Println("Лайк снят:", e.Track)
+		}
+		return code
 	case "path":
 		fmt.Println(path)
 	default:

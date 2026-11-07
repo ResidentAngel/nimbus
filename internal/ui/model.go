@@ -342,7 +342,7 @@ func (m *Model) toggleLike(current bool) {
 	if liked {
 		m.setStatus("♥ "+t.Title, false)
 	} else {
-		m.setStatus("Лайк снят: "+t.Title, false)
+		m.setStatus("Лайк снят: "+t.Title+" (f — вернуть)", false)
 	}
 	if m.view == viewLikes { // список лайков сразу отражает изменение
 		m.loadLikes()

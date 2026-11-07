@@ -102,6 +102,7 @@ nimbus likes export likes.json      # на старом устройстве
 nimbus likes import likes.json      # на новом: добавит недостающие, дубли пропустит
 nimbus likes import https://soundcloud.com/ник/likes   # забрать лайки своего профиля SoundCloud
 nimbus likes list                   # посмотреть список
+nimbus likes remove 3 7             # снять лайки по номерам из list (или по ссылке на трек)
 nimbus likes path                   # где лежит рабочий файл
 ```
 

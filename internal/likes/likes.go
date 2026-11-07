@@ -141,6 +141,24 @@ func (s *Store) Toggle(t soundcloud.Track, at time.Time) (bool, error) {
 	return true, s.save()
 }
 
+// Remove снимает лайк с трека. Возвращает false, если трек не был лайкнут.
+func (s *Store) Remove(id int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.ids[id] {
+		return false, nil
+	}
+	delete(s.ids, id)
+	out := s.likes[:0]
+	for _, l := range s.likes {
+		if l.Track.ID != id {
+			out = append(out, l)
+		}
+	}
+	s.likes = out
+	return true, s.save()
+}
+
 // Entries возвращает копию списка, от новых к старым.
 func (s *Store) Entries() []Like {
 	s.mu.Lock()

@@ -198,7 +198,7 @@ func progressBar(pos, total time.Duration, w int) string {
 func (m *Model) helpLine(w int) string {
 	keys := [][2]string{
 		{"/", "поиск"}, {"enter", "играть"}, {"␣", "пауза"}, {"←/→", "перемотка"},
-		{"f", "лайк"}, {"n/b", "след/пред"}, {"tab", "вкладки"}, {"+/-", "громкость"}, {"q", "выход"},
+		{"f", "лайк/снять"}, {"n/b", "след/пред"}, {"tab", "вкладки"}, {"+/-", "громкость"}, {"q", "выход"},
 	}
 	if m.input.Focused() {
 		keys = [][2]string{{"enter", "найти"}, {"esc", "к списку"}, {"ctrl+c", "выход"}}
