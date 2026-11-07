@@ -52,8 +52,14 @@ go build -o nimbus .
 На Linux для звука нужны заголовки ALSA (`sudo apt install libasound2-dev`) и cgo.
 На Windows и macOS ничего дополнительно ставить не надо.
 
-Необязательно: если в `PATH` есть **ffmpeg**, nimbus сможет играть треки,
-у которых SoundCloud отдаёт только AAC/Opus.
+**Рекомендуется ffmpeg.** SoundCloud постепенно отключает MP3-потоки, и многие треки
+доступны только в AAC/Opus — их nimbus перекодирует через ffmpeg из `PATH`:
+
+```bash
+winget install Gyan.FFmpeg      # Windows
+brew install ffmpeg             # macOS
+sudo apt install ffmpeg         # Linux
+```
 
 ## Использование
 
@@ -77,6 +83,7 @@ nimbus https://soundcloud.com/user/sets/playlist
 | `q`               | выход                             |
 
 Свой `client_id` можно передать флагом `-client-id` или переменной `SC_CLIENT_ID`.
+Если трек не играет, запустите `nimbus -debug nimbus.log` — в лог попадут доступные форматы и ошибки.
 
 ## Как это устроено
 

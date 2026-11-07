@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -24,6 +25,7 @@ func main() {
 	clientID := flag.String("client-id", os.Getenv("SC_CLIENT_ID"),
 		"client_id SoundCloud API (по умолчанию SC_CLIENT_ID или автоопределение)")
 	showVersion := flag.Bool("version", false, "показать версию")
+	debug := flag.String("debug", "", "писать отладочный лог в указанный файл")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("nimbus", version)
@@ -37,7 +39,19 @@ func main() {
 	}
 	defer pl.Stop()
 
-	m := ui.New(soundcloud.New(*clientID), pl, strings.Join(flag.Args(), " "))
+	sc := soundcloud.New(*clientID)
+	if *debug != "" {
+		f, err := os.Create(*debug)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "не удалось создать лог:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		lg := log.New(f, "", log.Ltime)
+		sc.Log = lg.Printf
+	}
+
+	m := ui.New(sc, pl, strings.Join(flag.Args(), " "))
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ошибка:", err)
 		os.Exit(1)

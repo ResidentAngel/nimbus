@@ -237,7 +237,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = ""
 		if msg.err != nil {
-			text := msg.err.Error()
+			text := strings.ReplaceAll(msg.err.Error(), "\n", "; ")
+			if errors.Is(msg.err, soundcloud.ErrNeedFFmpeg) { // остальные треки упадут так же
+				m.setStatus(text, true)
+				return m, nil
+			}
 			if errors.Is(msg.err, soundcloud.ErrNoStream) {
 				text += " — вероятно, трек только для Go+"
 			}

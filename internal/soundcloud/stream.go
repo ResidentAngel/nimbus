@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -23,10 +24,12 @@ func isMP3(t Transcoding) bool { return strings.HasPrefix(t.Format.MimeType, "au
 
 func hasFFmpeg() bool { _, err := exec.LookPath("ffmpeg"); return err == nil }
 
-// pickTranscoding выбирает лучший поддерживаемый вариант. Зашифрованные (DRM)
-// потоки — ctr-encrypted-hls / cbc-encrypted-hls — намеренно не используются.
-func pickTranscoding(ts []Transcoding) (Transcoding, bool) {
-	ffmpeg := hasFFmpeg()
+// ErrNeedFFmpeg — у трека есть только AAC/Opus-потоки, а ffmpeg не установлен.
+var ErrNeedFFmpeg = errors.New("SoundCloud отдаёт этот трек только в AAC/Opus — установите ffmpeg (winget install Gyan.FFmpeg) и перезапустите nimbus")
+
+// candidates возвращает поддерживаемые транскодинги от лучшего к худшему.
+// Зашифрованные (DRM) потоки — ctr-encrypted-hls / cbc-encrypted-hls — намеренно не используются.
+func candidates(ts []Transcoding, ffmpeg bool) (out []Transcoding, needFFmpeg bool) {
 	score := func(t Transcoding) int {
 		s := 0
 		switch {
@@ -36,6 +39,9 @@ func pickTranscoding(ts []Transcoding) (Transcoding, bool) {
 			s = 20
 		case t.Format.Protocol == "hls" && ffmpeg: // AAC/Opus — перекодируем через ffmpeg
 			s = 10
+		case t.Format.Protocol == "hls":
+			needFFmpeg = true
+			return -1
 		default:
 			return -1
 		}
@@ -44,17 +50,19 @@ func pickTranscoding(ts []Transcoding) (Transcoding, bool) {
 		}
 		return s
 	}
-	best, bestScore := Transcoding{}, -1
+	scores := map[string]int{}
 	for _, t := range ts {
-		if sc := score(t); sc > bestScore {
-			best, bestScore = t, sc
+		if sc := score(t); sc >= 0 {
+			scores[t.URL] = sc
+			out = append(out, t)
 		}
 	}
-	return best, bestScore >= 0
+	sort.SliceStable(out, func(i, j int) bool { return scores[out[i].URL] > scores[out[j].URL] })
+	return out, needFFmpeg
 }
 
-// Open возвращает аудиопоток трека в формате MP3. Данные подкачиваются
-// в фоне с опережением, поэтому сетевые задержки не вызывают заиканий.
+// Open возвращает аудиопоток трека в формате MP3. Перебирает доступные форматы,
+// пока один не откроется. Данные подкачиваются в фоне с опережением.
 func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
 	if t.Policy == "BLOCK" {
 		return nil, errors.New("трек заблокирован в вашем регионе")
@@ -66,11 +74,36 @@ func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
 		}
 		*t = full
 	}
-	tc, ok := pickTranscoding(t.Media.Transcodings)
-	if !ok {
-		return nil, ErrNoStream
+	ffmpeg := hasFFmpeg()
+	list, needFFmpeg := candidates(t.Media.Transcodings, ffmpeg)
+	c.logf("track %d %q: ffmpeg=%v", t.ID, t.Title, ffmpeg)
+	for _, tc := range t.Media.Transcodings {
+		c.logf("  transcoding %s | %s | snipped=%v | %s", tc.Format.Protocol, tc.Format.MimeType, tc.Snipped, tc.Preset)
 	}
 
+	var errs []error
+	for _, tc := range list {
+		st, err := c.openTranscoding(ctx, t, tc)
+		if err == nil {
+			c.logf("  -> playing %s %s", tc.Format.Protocol, tc.Format.MimeType)
+			return st, nil
+		}
+		c.logf("  -> %s %s failed: %v", tc.Format.Protocol, tc.Format.MimeType, err)
+		errs = append(errs, fmt.Errorf("%s/%s: %w", tc.Format.Protocol, tc.Preset, err))
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if needFFmpeg && !ffmpeg {
+		return nil, ErrNeedFFmpeg
+	}
+	if len(errs) == 0 {
+		return nil, ErrNoStream
+	}
+	return nil, errors.Join(errs...)
+}
+
+func (c *Client) openTranscoding(ctx context.Context, t *Track, tc Transcoding) (*Stream, error) {
 	q := url.Values{}
 	if t.TrackAuthorization != "" {
 		q.Set("track_authorization", t.TrackAuthorization)
@@ -81,13 +114,21 @@ func (c *Client) Open(ctx context.Context, t *Track) (*Stream, error) {
 	if err := c.getJSON(ctx, tc.URL, q, &loc); err != nil {
 		return nil, err
 	}
+	if loc.URL == "" {
+		return nil, errors.New("пустая ссылка на поток")
+	}
 
 	var produce func(ctx context.Context, emit emitFunc) error
 	switch {
 	case tc.Format.Protocol == "progressive":
 		produce = func(ctx context.Context, emit emitFunc) error { return c.copyURL(ctx, loc.URL, emit) }
 	case isMP3(tc):
-		produce = func(ctx context.Context, emit emitFunc) error { return c.copyHLS(ctx, loc.URL, emit, 0) }
+		// плейлист читаем сразу, чтобы ошибка всплыла здесь и мы перешли к следующему формату
+		segments, err := c.hlsSegments(ctx, loc.URL, 0)
+		if err != nil {
+			return nil, err
+		}
+		produce = func(ctx context.Context, emit emitFunc) error { return c.copySegments(ctx, segments, emit) }
 	default:
 		produce = func(ctx context.Context, emit emitFunc) error { return copyFFmpeg(ctx, loc.URL, emit) }
 	}
@@ -134,36 +175,43 @@ func (c *Client) copyURL(ctx context.Context, u string, emit emitFunc) error {
 	return copyReader(resp.Body, emit)
 }
 
-// copyHLS скачивает m3u8-плейлист и последовательно отдаёт его MP3-сегменты.
-func (c *Client) copyHLS(ctx context.Context, playlistURL string, emit emitFunc, depth int) error {
+// hlsSegments скачивает m3u8-плейлист и возвращает адреса сегментов.
+func (c *Client) hlsSegments(ctx context.Context, playlistURL string, depth int) ([]string, error) {
 	base, err := url.Parse(playlistURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	text, err := c.fetchText(ctx, playlistURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var segments []string
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if strings.HasPrefix(line, "#EXT-X-KEY") && !strings.Contains(line, "METHOD=NONE") {
-			return errors.New("поток зашифрован")
+			return nil, errors.New("поток зашифрован")
 		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		ref, err := base.Parse(line)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if strings.Contains(ref.Path, ".m3u8") && depth == 0 { // master-плейлист
+			return c.hlsSegments(ctx, ref.String(), depth+1)
 		}
 		segments = append(segments, ref.String())
 	}
+	if len(segments) == 0 {
+		return nil, errors.New("пустой HLS-плейлист")
+	}
+	return segments, nil
+}
+
+func (c *Client) copySegments(ctx context.Context, segments []string, emit emitFunc) error {
 	for _, seg := range segments {
-		if strings.Contains(seg, ".m3u8") && depth == 0 { // master-плейлист
-			return c.copyHLS(ctx, seg, emit, depth+1)
-		}
 		var err error
 		for try := 0; try < 3; try++ {
 			if err = c.copyURL(ctx, seg, emit); err == nil || ctx.Err() != nil {

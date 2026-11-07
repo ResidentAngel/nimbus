@@ -70,6 +70,15 @@ type Client struct {
 	mu       sync.Mutex
 	clientID string
 	fixedID  bool // client_id задан пользователем явно — не перевыпускаем
+
+	// Log, если задан, получает отладочные сообщения (выбор формата, ошибки потоков).
+	Log func(format string, args ...any)
+}
+
+func (c *Client) logf(format string, args ...any) {
+	if c.Log != nil {
+		c.Log(format, args...)
+	}
 }
 
 // New создаёт клиент. Если clientID пустой, он будет автоматически
