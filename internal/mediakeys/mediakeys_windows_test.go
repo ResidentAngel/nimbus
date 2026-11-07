@@ -9,19 +9,24 @@ import (
 
 // Проверяем цикл сообщений без нажатия настоящих клавиш: шлём потоку WM_HOTKEY.
 func TestListenWindows(t *testing.T) {
-	l, err := Listen()
+	l, err := Listen(true)
 	if err != nil {
 		t.Skip("клавиши заняты другой программой:", err)
 	}
-	for _, k := range []Key{Next, PlayPause, Prev} {
-		l.simulate(k)
+	// 2 — ⏭, 1 — ⏯, 11 — F6 (назад), 12 — F7 (пауза), 13 — F8 (вперёд)
+	cases := []struct {
+		id   uintptr
+		want Key
+	}{{2, Next}, {1, PlayPause}, {11, Prev}, {12, PlayPause}, {13, Next}}
+	for _, c := range cases {
+		l.simulate(c.id)
 		select {
 		case got := <-l.Keys:
-			if got != k {
-				t.Fatalf("got %v, want %v", got, k)
+			if got != c.want {
+				t.Fatalf("id %d: got %v, want %v", c.id, got, c.want)
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatalf("%v не дошла", k)
+			t.Fatalf("id %d не дошла", c.id)
 		}
 	}
 	l.Close()

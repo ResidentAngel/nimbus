@@ -27,15 +27,33 @@ const (
 	vkMediaPrev      = 0xB1
 	vkMediaStop      = 0xB2
 	vkMediaPlayPause = 0xB3
+
+	vkF6 = 0x75
+	vkF7 = 0x76
+	vkF8 = 0x77
 )
 
-// id горячей клавиши = Key + 1 (id 0 недопустим).
-var vks = map[Key]uintptr{
-	PlayPause: vkMediaPlayPause,
-	Next:      vkMediaNext,
-	Prev:      vkMediaPrev,
-	Stop:      vkMediaStop,
+type binding struct {
+	id  uintptr // id горячей клавиши, 0 недопустим
+	vk  uintptr
+	key Key
 }
+
+var (
+	mediaBindings = []binding{
+		{1, vkMediaPlayPause, PlayPause},
+		{2, vkMediaNext, Next},
+		{3, vkMediaPrev, Prev},
+		{4, vkMediaStop, Stop},
+	}
+	// F6/F7/F8 — то, что приходит при Fn+F6/F7/F8 на ноутбуках, где верхний ряд
+	// по умолчанию мультимедийный. Глобально занимают эти клавиши во всех программах.
+	fkeyBindings = []binding{
+		{11, vkF6, Prev},
+		{12, vkF7, PlayPause},
+		{13, vkF8, Next},
+	}
+)
 
 type msg struct {
 	hwnd    uintptr
@@ -47,13 +65,21 @@ type msg struct {
 	private uint32
 }
 
-// Listen регистрирует системные горячие клавиши для мультимедийных кнопок.
-// Пока nimbus запущен, эти кнопки управляют им, а не другими плеерами.
-func Listen() (*Listener, error) {
+// Listen регистрирует системные горячие клавиши для мультимедийных кнопок,
+// а при fkeys — ещё и F6/F7/F8. Пока nimbus запущен, эти клавиши управляют им.
+func Listen(fkeys bool) (*Listener, error) {
+	bindings := mediaBindings
+	if fkeys {
+		bindings = append(append([]binding(nil), mediaBindings...), fkeyBindings...)
+	}
+	byID := map[uintptr]Key{}
+	for _, b := range bindings {
+		byID[b.id] = b.key
+	}
 	keys := make(chan Key, 8)
 	type started struct {
 		tid     uint32
-		missing []Key
+		missing []string
 		err     error
 	}
 	ready := make(chan started, 1)
@@ -64,12 +90,13 @@ func Listen() (*Listener, error) {
 		defer runtime.UnlockOSThread()
 		defer close(keys)
 
-		var ok, missing []Key
-		for _, k := range []Key{PlayPause, Next, Prev, Stop} {
-			if r, _, _ := procRegisterHotKey.Call(0, uintptr(k)+1, modNoRepeat, vks[k]); r != 0 {
-				ok = append(ok, k)
+		var ok []binding
+		var missing []string
+		for _, b := range bindings {
+			if r, _, _ := procRegisterHotKey.Call(0, b.id, modNoRepeat, b.vk); r != 0 {
+				ok = append(ok, b)
 			} else {
-				missing = append(missing, k)
+				missing = append(missing, keyName(b.vk))
 			}
 		}
 		if len(ok) == 0 {
@@ -77,8 +104,8 @@ func Listen() (*Listener, error) {
 			return
 		}
 		defer func() {
-			for _, k := range ok {
-				procUnregisterHotKey.Call(0, uintptr(k)+1)
+			for _, b := range ok {
+				procUnregisterHotKey.Call(0, b.id)
 			}
 		}()
 		ready <- started{tid: windows.GetCurrentThreadId(), missing: missing}
@@ -89,9 +116,9 @@ func Listen() (*Listener, error) {
 			if int32(r) <= 0 { // WM_QUIT или ошибка
 				return
 			}
-			if m.message == wmHotkey && m.wParam >= 1 && m.wParam <= uintptr(Stop)+1 {
+			if k, known := byID[m.wParam]; m.message == wmHotkey && known {
 				select {
-				case keys <- Key(m.wParam - 1):
+				case keys <- k:
 				default: // интерфейс не успевает — лишние нажатия не копим
 				}
 			}
@@ -112,6 +139,25 @@ func Listen() (*Listener, error) {
 
 // simulate отправляет потоку слушателя WM_HOTKEY — только для тестов,
 // чтобы не нажимать настоящие клавиши в системе.
-func (l *Listener) simulate(k Key) {
-	procPostThreadMsgW.Call(uintptr(l.tid), wmHotkey, uintptr(k)+1, 0)
+func (l *Listener) simulate(id uintptr) {
+	procPostThreadMsgW.Call(uintptr(l.tid), wmHotkey, id, 0)
+}
+
+func keyName(vk uintptr) string {
+	switch vk {
+	case vkF6:
+		return "F6"
+	case vkF7:
+		return "F7"
+	case vkF8:
+		return "F8"
+	case vkMediaPlayPause:
+		return "⏯"
+	case vkMediaNext:
+		return "⏭"
+	case vkMediaPrev:
+		return "⏮"
+	default:
+		return "⏹"
+	}
 }

@@ -4,4 +4,4 @@ package mediakeys
 
 // Listen на macOS и Linux пока не реализован: там нужны MPRemoteCommandCenter
 // (macOS) или MPRIS через D-Bus (Linux).
-func Listen() (*Listener, error) { return nil, ErrUnsupported }
+func Listen(fkeys bool) (*Listener, error) { return nil, ErrUnsupported }

@@ -85,6 +85,8 @@ func run() int {
 		"client_id SoundCloud API (по умолчанию SC_CLIENT_ID или автоопределение)")
 	showVersion := flag.Bool("version", false, "показать версию")
 	debug := flag.String("debug", "", "писать отладочный лог в указанный файл")
+	fkeys := flag.Bool("fkeys", os.Getenv("NIMBUS_FKEYS") != "",
+		"F6/F7/F8 (Fn+F6/F7/F8 на ноутбуке) — назад/пауза/вперёд во всей системе, пока nimbus открыт")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Использование: nimbus [флаги] [запрос или ссылка]")
 		fmt.Fprintln(os.Stderr, "               nimbus likes …   лайки: экспорт, импорт, список (подробнее: nimbus likes)")
@@ -125,9 +127,18 @@ func run() int {
 
 	m := ui.New(sc, pl, history.Open(history.DefaultPath()), lk, strings.Join(flag.Args(), " "))
 	if os.Getenv("NIMBUS_NO_MEDIA_KEYS") == "" {
-		if mk, err := mediakeys.Listen(); err == nil {
+		mk, err := mediakeys.Listen(*fkeys)
+		switch {
+		case err == nil:
 			defer mk.Close()
 			m.MediaKeys = mk.Keys
+			if len(mk.Missing) > 0 {
+				m.Notify("Заняты другой программой: "+strings.Join(mk.Missing, " "), true)
+			} else if *fkeys {
+				m.Notify("F6 / F7 / F8 — назад / пауза / вперёд, работают и когда окно свёрнуто", false)
+			}
+		case *fkeys:
+			m.Notify("Не удалось занять F6/F7/F8: "+err.Error(), true)
 		}
 	}
 	if os.Getenv("NIMBUS_NO_UPDATE_CHECK") == "" {

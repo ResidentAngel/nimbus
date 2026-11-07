@@ -25,7 +25,7 @@ var ErrUnsupported = errors.New("мультимедийные клавиши н�
 type Listener struct {
 	Keys <-chan Key
 	// Missing — клавиши, которые не удалось занять (их уже перехватила другая программа).
-	Missing []Key
+	Missing []string
 	tid     uint32 // поток с циклом сообщений (Windows)
 	close   func()
 }

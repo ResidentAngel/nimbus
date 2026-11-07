@@ -217,6 +217,9 @@ func (m *Model) startLoading(text string) tea.Cmd {
 	return m.spin.Tick
 }
 
+// Notify показывает сообщение в строке статуса (например, при запуске).
+func (m *Model) Notify(text string, isErr bool) { m.setStatus(text, isErr) }
+
 func (m *Model) setStatus(text string, isErr bool) { m.status, m.statusErr = text, isErr }
 
 // submit запускает поиск или resolve ссылки.
@@ -623,6 +626,10 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		}
 	case "r":
 		m.toggleShuffle()
+	case "f6", "f7", "f8": // Fn+F6/F7/F8 на ноутбуках с мультимедийным верхним рядом
+		return m.handleMediaKey(map[string]mediakeys.Key{
+			"f6": mediakeys.Prev, "f7": mediakeys.PlayPause, "f8": mediakeys.Next,
+		}[k.String()])
 	case "n":
 		return m.step(+1)
 	case "b":
