@@ -469,18 +469,21 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		case "esc":
 			m.input.Blur()
 			return nil
-		case "down", "tab":
+		case "down":
 			if len(m.tracks) > 0 {
 				m.input.Blur()
 			}
 			return nil
+		case "tab", "shift+tab": // выходим из поиска и сразу переключаем вкладку
+			m.input.Blur()
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(k)
+			return cmd
 		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(k)
-		return cmd
 	}
 
-	switch k.String() {
+	switch latinKey(k) {
 	case "q":
 		m.pl.Stop()
 		return tea.Quit
