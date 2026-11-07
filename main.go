@@ -22,6 +22,7 @@ import (
 
 	"github.com/ResidentAngel/nimbus/internal/history"
 	"github.com/ResidentAngel/nimbus/internal/likes"
+	"github.com/ResidentAngel/nimbus/internal/mediakeys"
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 	"github.com/ResidentAngel/nimbus/internal/ui"
@@ -123,6 +124,12 @@ func run() int {
 	}
 
 	m := ui.New(sc, pl, history.Open(history.DefaultPath()), lk, strings.Join(flag.Args(), " "))
+	if os.Getenv("NIMBUS_NO_MEDIA_KEYS") == "" {
+		if mk, err := mediakeys.Listen(); err == nil {
+			defer mk.Close()
+			m.MediaKeys = mk.Keys
+		}
+	}
 	if os.Getenv("NIMBUS_NO_UPDATE_CHECK") == "" {
 		m.UpdateCheck = func(ctx context.Context) (string, error) { return update.CheckNewer(ctx, version) }
 	}

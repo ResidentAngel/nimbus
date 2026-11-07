@@ -15,6 +15,7 @@ import (
 
 	"github.com/ResidentAngel/nimbus/internal/history"
 	"github.com/ResidentAngel/nimbus/internal/likes"
+	"github.com/ResidentAngel/nimbus/internal/mediakeys"
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 )
@@ -52,6 +53,10 @@ type (
 	}
 	seekFireMsg struct{ gen int }
 	updateMsg   struct{ tag string }
+	mediaKeyMsg struct {
+		key mediakeys.Key
+		ok  bool // false — канал закрыт
+	}
 )
 
 type Model struct {
@@ -59,6 +64,9 @@ type Model struct {
 	// тег более новой версии (или "", если обновлений нет).
 	UpdateCheck func(context.Context) (string, error)
 	newVersion  string
+
+	// MediaKeys, если задан, — нажатия мультимедийных клавиш (⏯ ⏭ ⏮, Fn+F-клавиши).
+	MediaKeys <-chan mediakeys.Key
 
 	sc    *soundcloud.Client
 	pl    *player.Player
@@ -138,6 +146,9 @@ func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, lk *like
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tick(), m.waitEnded(), textinput.Blink}
+	if m.MediaKeys != nil {
+		cmds = append(cmds, m.waitMediaKey())
+	}
 	if check := m.UpdateCheck; check != nil {
 		cmds = append(cmds, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -163,6 +174,42 @@ func tick() tea.Cmd {
 func (m *Model) waitEnded() tea.Cmd {
 	ch := m.ended
 	return func() tea.Msg { <-ch; return endedMsg{} }
+}
+
+func (m *Model) waitMediaKey() tea.Cmd {
+	ch := m.MediaKeys
+	return func() tea.Msg {
+		k, ok := <-ch
+		return mediaKeyMsg{key: k, ok: ok}
+	}
+}
+
+// handleMediaKey — реакция на мультимедийную клавишу, работает и без фокуса на окне.
+func (m *Model) handleMediaKey(k mediakeys.Key) tea.Cmd {
+	switch k {
+	case mediakeys.PlayPause:
+		if m.playing {
+			m.paused = m.pl.TogglePause()
+			return nil
+		}
+		if len(m.queue) > 0 && m.queueIdx >= 0 {
+			return m.play(m.queueIdx)
+		}
+		return m.playFromList(m.cursor)
+	case mediakeys.Next:
+		return m.step(+1)
+	case mediakeys.Prev:
+		// как в обычных плеерах: после 3 секунд — в начало трека, иначе — предыдущий
+		if m.playing && m.pos > 3*time.Second {
+			return m.seekBy(-m.pos)
+		}
+		return m.step(-1)
+	case mediakeys.Stop:
+		if m.playing && !m.paused {
+			m.paused = m.pl.TogglePause()
+		}
+	}
+	return nil
 }
 
 func (m *Model) startLoading(text string) tea.Cmd {
@@ -393,6 +440,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
+
+	case mediaKeyMsg:
+		if !msg.ok {
+			return m, nil
+		}
+		return m, tea.Batch(m.waitMediaKey(), m.handleMediaKey(msg.key))
 
 	case updateMsg:
 		m.newVersion = msg.tag
