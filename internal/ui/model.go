@@ -51,9 +51,15 @@ type (
 		err     error
 	}
 	seekFireMsg struct{ gen int }
+	updateMsg   struct{ tag string }
 )
 
 type Model struct {
+	// UpdateCheck, если задан, вызывается в фоне при запуске и возвращает
+	// тег более новой версии (или "", если обновлений нет).
+	UpdateCheck func(context.Context) (string, error)
+	newVersion  string
+
 	sc    *soundcloud.Client
 	pl    *player.Player
 	hist  *history.Store
@@ -71,6 +77,8 @@ type Model struct {
 
 	queue    []soundcloud.Track // список, из которого идёт воспроизведение
 	queueIdx int
+	order    []int // порядок воспроизведения queue (см. queue.go)
+	shuffle  bool
 	now      *soundcloud.Track
 	preview  bool
 	skips    int
@@ -120,7 +128,7 @@ func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, lk *like
 		queueIdx: -1, volume: pl.Volume(), initial: strings.TrimSpace(initial),
 		ended: make(chan struct{}, 1), req: new(atomic.Int64),
 		width: 80, height: 24,
-		status: "Нажмите / для поиска, f — лайк, Tab — вкладки, ? — подсказка по клавишам",
+		status: "Нажмите / для поиска, f — лайк, r — вперемешку, Tab — вкладки, ? — все клавиши",
 	}
 	if m.initial == "" {
 		m.input.Focus()
@@ -130,6 +138,17 @@ func New(sc *soundcloud.Client, pl *player.Player, hist *history.Store, lk *like
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tick(), m.waitEnded(), textinput.Blink}
+	if check := m.UpdateCheck; check != nil {
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tag, err := check(ctx)
+			if err != nil || tag == "" {
+				return nil // без интернета или без релизов — молча
+			}
+			return updateMsg{tag: tag}
+		})
+	}
 	if m.initial != "" {
 		m.input.SetValue(m.initial)
 		cmds = append(cmds, m.submit(m.initial))
@@ -225,6 +244,7 @@ func (m *Model) playFromList(i int) tea.Cmd {
 		return nil
 	}
 	m.queue = append([]soundcloud.Track(nil), m.tracks...)
+	m.order = buildOrder(len(m.queue), i, m.shuffle)
 	m.skips = 0
 	return m.play(i)
 }
@@ -233,8 +253,8 @@ func (m *Model) step(delta int) tea.Cmd {
 	if len(m.queue) == 0 {
 		return m.playFromList(m.cursor)
 	}
-	next := max(0, m.queueIdx+delta)
-	if next >= len(m.queue) {
+	next := m.nextIdx(m.queueIdx, delta)
+	if next < 0 {
 		m.setStatus("Конец списка", false)
 		return nil
 	}
@@ -374,6 +394,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 
+	case updateMsg:
+		m.newVersion = msg.tag
+		if m.loading == "" && !m.statusErr {
+			m.setStatus("Доступна новая версия "+msg.tag+" — закройте плеер и выполните: nimbus update", false)
+		}
+
 	case seekFireMsg:
 		if msg.gen != m.seekGen || !m.seekPending || m.now == nil {
 			return m, nil
@@ -419,9 +445,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text += " — вероятно, трек только для Go+"
 			}
 			m.skips++
-			if m.skips < maxSkips && msg.idx+1 < len(m.queue) {
+			if next := m.nextIdx(msg.idx, +1); m.skips < maxSkips && next >= 0 {
 				m.setStatus("Пропуск «"+msg.track.Title+"»: "+text, true)
-				return m, m.play(msg.idx + 1)
+				return m, m.play(next)
 			}
 			m.setStatus("Не удалось воспроизвести: "+text, true)
 			return m, nil
@@ -542,6 +568,8 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		if m.now != nil {
 			return m.seekBy(-m.now.Length())
 		}
+	case "r":
+		m.toggleShuffle()
 	case "n":
 		return m.step(+1)
 	case "b":
@@ -555,7 +583,7 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 			m.setStatus(m.now.PermalinkURL, false)
 		}
 	case "?":
-		m.setStatus("enter — играть · пробел — пауза · ←/→ — перемотка 10 с (shift — 30 с) · 0 — в начало · n/b — след/пред · f — лайк выбранному (F — текущему) · Tab — вкладки · h — история · +/- — громкость · / — поиск · q — выход", false)
+		m.setStatus("enter — играть · пробел — пауза · ←/→ — перемотка 10 с (shift — 30 с) · 0 — в начало · n/b — след/пред · r — вперемешку · f — лайк выбранному (F — текущему) · Tab — вкладки · h — история · +/- — громкость · / — поиск · q — выход", false)
 	}
 	return nil
 }

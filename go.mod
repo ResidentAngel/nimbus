@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gopxl/beep/v2 v2.1.1
 	github.com/mattn/go-runewidth v0.0.31
+	golang.org/x/mod v0.25.0
 )
 
 require (

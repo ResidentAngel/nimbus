@@ -3,7 +3,9 @@
 //	nimbus                       открыть плеер
 //	nimbus lofi hip hop          сразу искать
 //	nimbus https://soundcloud.com/artist/track-or-set
-//	nimbus likes export|import|list|path
+//	nimbus likes export|import|list|remove|path
+//	nimbus update                обновиться до последнего релиза
+//	nimbus version
 package main
 
 import (
@@ -23,15 +25,58 @@ import (
 	"github.com/ResidentAngel/nimbus/internal/player"
 	"github.com/ResidentAngel/nimbus/internal/soundcloud"
 	"github.com/ResidentAngel/nimbus/internal/ui"
+	"github.com/ResidentAngel/nimbus/internal/update"
 )
 
-var version = "dev"
+// version подставляется при сборке релиза: -ldflags "-X main.version=v1.2.0".
+var version string
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "likes" {
-		os.Exit(likesCmd(os.Args[2:]))
+	version = update.Version(version)
+	update.CleanupOld()
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "likes":
+			os.Exit(likesCmd(os.Args[2:]))
+		case "update":
+			os.Exit(updateCmd())
+		case "version":
+			fmt.Println("nimbus", version)
+			return
+		}
 	}
 	os.Exit(run())
+}
+
+func updateCmd() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	fmt.Println("Текущая версия:", version)
+	rel, err := update.Latest(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "не удалось узнать последнюю версию:", err)
+		return 1
+	}
+	if !update.Newer(version, rel.Tag) {
+		if version == "dev" {
+			fmt.Println("Это локальная сборка — обновляйтесь через git pull. Последний релиз:", rel.Tag)
+		} else {
+			fmt.Println("У вас последняя версия.")
+		}
+		return 0
+	}
+	exe, err := update.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "не удалось найти nimbus.exe:", err)
+		return 1
+	}
+	fmt.Printf("Скачиваю %s…\n", rel.Tag)
+	if err := update.Apply(ctx, rel, exe); err != nil {
+		fmt.Fprintln(os.Stderr, "обновление не удалось:", err)
+		return 1
+	}
+	fmt.Printf("Готово: nimbus обновлён до %s.\n", rel.Tag)
+	return 0
 }
 
 func run() int {
@@ -41,7 +86,9 @@ func run() int {
 	debug := flag.String("debug", "", "писать отладочный лог в указанный файл")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Использование: nimbus [флаги] [запрос или ссылка]")
-		fmt.Fprintln(os.Stderr, "               nimbus likes export|import|list|path  (подробнее: nimbus likes)")
+		fmt.Fprintln(os.Stderr, "               nimbus likes …   лайки: экспорт, импорт, список (подробнее: nimbus likes)")
+		fmt.Fprintln(os.Stderr, "               nimbus update    обновиться до последней версии")
+		fmt.Fprintln(os.Stderr, "               nimbus version")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -76,6 +123,9 @@ func run() int {
 	}
 
 	m := ui.New(sc, pl, history.Open(history.DefaultPath()), lk, strings.Join(flag.Args(), " "))
+	if os.Getenv("NIMBUS_NO_UPDATE_CHECK") == "" {
+		m.UpdateCheck = func(ctx context.Context) (string, error) { return update.CheckNewer(ctx, version) }
+	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ошибка:", err)
 		return 1

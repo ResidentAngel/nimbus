@@ -67,8 +67,13 @@ func (m *Model) View() string {
 func (m *Model) header(w int) string {
 	left := logoStyle.Render("☁ nimbus")
 	right := volumeBar(m.volume, 10) + dimStyle.Render(fmt.Sprintf(" %3d%%", m.volume))
-	if w >= 70 {
+	switch {
+	case m.newVersion != "" && w >= 70:
+		left += accentStyle.Render("  ↑ " + m.newVersion + ": nimbus update")
+	case w >= 70:
 		left += dimStyle.Render("  soundcloud без рекламы")
+	}
+	if w >= 70 {
 		right = dimStyle.Render("громкость ") + right
 	}
 	gap := max(1, w-lipgloss.Width(left)-lipgloss.Width(right))
@@ -174,7 +179,10 @@ func (m *Model) nowPlaying(w int) string {
 		sub += " · превью 30 с"
 	}
 	if len(m.queue) > 0 {
-		sub += fmt.Sprintf(" · %d/%d", m.queueIdx+1, len(m.queue))
+		sub += fmt.Sprintf(" · %d/%d", max(1, m.posOf(m.queueIdx)+1), len(m.queue))
+	}
+	if m.shuffle {
+		sub += " · вперемешку"
 	}
 	return icon + boldStyle.Render(title) + "\n" +
 		dimStyle.Render("  "+runewidth.Truncate(sub, w-3, "…")) + "\n" +
@@ -198,7 +206,7 @@ func progressBar(pos, total time.Duration, w int) string {
 func (m *Model) helpLine(w int) string {
 	keys := [][2]string{
 		{"/", "поиск"}, {"enter", "играть"}, {"␣", "пауза"}, {"←/→", "перемотка"},
-		{"f", "лайк/снять"}, {"n/b", "след/пред"}, {"tab", "вкладки"}, {"+/-", "громкость"}, {"q", "выход"},
+		{"f", "лайк/снять"}, {"n/b", "след/пред"}, {"r", "вперемешку"}, {"tab", "вкладки"}, {"+/-", "громкость"}, {"q", "выход"},
 	}
 	if m.input.Focused() {
 		keys = [][2]string{{"enter", "найти"}, {"esc", "к списку"}, {"ctrl+c", "выход"}}

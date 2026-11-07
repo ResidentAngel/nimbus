@@ -1,0 +1,63 @@
+name: Release
+
+# Выпуск новой версии:  git tag v1.2.0 && git push origin v1.2.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Windows и macOS собираются без cgo — можно кросс-компилировать с Linux
+          - { runner: ubuntu-latest, goos: windows, goarch: amd64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: windows, goarch: arm64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: darwin, goarch: amd64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: darwin, goarch: arm64, cgo: "0" }
+          # Linux нужен cgo + ALSA, поэтому собираем на родной архитектуре
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cgo: "1" }
+          - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, cgo: "1" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: ALSA headers
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          name="nimbus_${GOOS}_${GOARCH}"
+          if [ "$GOOS" = windows ]; then name="$name.exe"; fi
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$name" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nimbus_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > checksums.txt && cat checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "nimbus $GITHUB_REF_NAME" --generate-notes
